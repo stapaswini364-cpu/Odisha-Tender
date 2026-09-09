@@ -1,7 +1,18 @@
-import { chromium } from "playwright-core";
+import chromium from "@sparticuz/chromium";
+import { chromium as playwrightChromium } from "playwright-core";
 
 export async function createBrowser() {
-  return chromium.launch({
+  const isProduction = process.env.VERCEL === "1";
+
+  if (isProduction) {
+    return playwrightChromium.launch({
+      args: chromium.args,
+      executablePath: await chromium.executablePath(),
+      headless: true,
+    });
+  }
+
+  return playwrightChromium.launch({
     headless: true,
   });
 }

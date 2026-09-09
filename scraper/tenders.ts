@@ -8,7 +8,9 @@ const ORGANISATION_URL =
   process.env.PORTAL_TENDERS_BY_ORG_URL ||
   "https://tendersodisha.gov.in/nicgep/app?page=FrontEndTendersByOrganisation&service=page";
 
-const PORTAL_BASE_URL = "https://tendersodisha.gov.in";
+const PORTAL_BASE_URL =
+  process.env.PORTAL_BASE_URL ||
+  "https://tendersodisha.gov.in";
 
 export type ScrapedTender = {
   organisationName: string;
@@ -21,7 +23,7 @@ export type ScrapedTender = {
 };
 
 /**
- * Parse portal date format:
+ * Parse portal date format.
  *
  * Example:
  * 08-Sep-2026 06:00 PM
@@ -114,14 +116,6 @@ function parseTenderDetails(value: string) {
  * Open organisation listing page with retry handling.
  *
  * Portal can sometimes be slow or temporarily unavailable.
- *
- * We use:
- *   waitUntil: "commit"
- *
- * instead of waiting for the complete page load.
- *
- * The actual readiness condition is:
- *   #table
  */
 async function openOrganisationPage(page: Page) {
   const maxAttempts = 3;
@@ -137,10 +131,6 @@ async function openOrganisationPage(page: Page) {
         timeout: 60_000,
       });
 
-      /**
-       * DOMContentLoaded is useful but should not block
-       * the scrape if the portal is slow.
-       */
       await page
         .waitForLoadState("domcontentloaded", {
           timeout: 30_000,
@@ -151,10 +141,6 @@ async function openOrganisationPage(page: Page) {
           );
         });
 
-      /**
-       * The organisation table is the actual
-       * readiness condition.
-       */
       const organisationTable = page.locator("#table");
 
       await organisationTable.waitFor({
@@ -193,6 +179,29 @@ async function openOrganisationPage(page: Page) {
 }
 
 /**
+ * Detect whether the portal is asking for CAPTCHA.
+ *
+ * Current portal CAPTCHA image selector:
+ * #captchaImage
+ */
+async function detectCaptcha(page: Page): Promise<boolean> {
+  const captchaImage = page.locator("#captchaImage");
+
+  try {
+    await captchaImage.waitFor({
+      state: "visible",
+      timeout: 3_000,
+    });
+
+    console.warn("CAPTCHA detected on tender page.");
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Scrape tenders for a single organisation.
  */
 export async function scrapeTendersByOrganisation(
@@ -223,7 +232,7 @@ export async function scrapeTendersByOrganisation(
 
     /**
      * Step 2:
-     * Organisation table.
+     * Get organisation table.
      */
     const organisationTable = page.locator("#table");
 
@@ -263,11 +272,9 @@ export async function scrapeTendersByOrganisation(
      * Get organisation href.
      *
      * IMPORTANT:
-     * Do NOT use click().
-     *
-     * The portal sometimes completes the click action
-     * but Playwright waits for a navigation event that
-     * never completes, resulting in a timeout.
+     * We use direct navigation instead of click()
+     * because the portal can sometimes cause
+     * Playwright navigation timeout after click().
      */
     const organisationHref =
       await organisationLink.getAttribute("href");
@@ -300,9 +307,6 @@ export async function scrapeTendersByOrganisation(
       timeout: 60_000,
     });
 
-    /**
-     * DOMContentLoaded should not be mandatory.
-     */
     await page
       .waitForLoadState("domcontentloaded", {
         timeout: 30_000,
@@ -320,7 +324,23 @@ export async function scrapeTendersByOrganisation(
 
     /**
      * Step 8:
-     * Wait for tender links.
+     * Detect CAPTCHA.
+     *
+     * We do not automatically bypass the portal CAPTCHA.
+     * Instead, report a specific CAPTCHA error so the
+     * cron/job-run layer can mark this run appropriately.
+     */
+    const captchaDetected = await detectCaptcha(page);
+
+    if (captchaDetected) {
+      throw new Error(
+        `CAPTCHA_REQUIRED: Portal CAPTCHA detected for ${organisationName}`
+      );
+    }
+
+    /**
+     * Step 9:
+     * Wait for actual tender links.
      *
      * We intentionally target only actual tender
      * detail links.
@@ -357,7 +377,7 @@ export async function scrapeTendersByOrganisation(
     const seenKeys = new Set<string>();
 
     /**
-     * Step 9:
+     * Step 10:
      * Parse each tender row.
      */
     for (
