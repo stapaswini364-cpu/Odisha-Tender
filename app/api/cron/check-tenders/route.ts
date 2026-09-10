@@ -17,7 +17,9 @@ import { scrapeOrganisations } from "@/scraper/organisations";
 import { scrapeTendersByOrganisation } from "@/scraper/tenders";
 import { createBrowser } from "@/scraper/browser";
 
-const BATCH_SIZE = 2;
+export const maxDuration = 60;
+
+const BATCH_SIZE = 1;
 
 const CURSOR_KEY = "org_cursor";
 
