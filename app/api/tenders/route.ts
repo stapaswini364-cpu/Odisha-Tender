@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, and, or, ilike, SQL } from "drizzle-orm";
 import { db } from "@/db";
 import { organisations, tenders } from "@/db/schema";
 
@@ -9,8 +9,11 @@ export async function GET(request: NextRequest) {
 
     const organisationId = searchParams.get("organisationId");
     const type = searchParams.get("type");
+    const q = searchParams.get("q"); // free-text search
+    const limitParam = searchParams.get("limit");
+    const limit = limitParam ? Math.min(Number(limitParam), 200) : 50;
 
-    const conditions = [];
+    const conditions: SQL[] = [];
 
     if (organisationId) {
       conditions.push(eq(tenders.organisationId, organisationId));
@@ -18,6 +21,18 @@ export async function GET(request: NextRequest) {
 
     if (type) {
       conditions.push(eq(tenders.type, type));
+    }
+
+    if (q && q.trim()) {
+      const term = `%${q.trim()}%`;
+      // Search across title, reference number, and organisation name
+      conditions.push(
+        or(
+          ilike(tenders.title, term),
+          ilike(tenders.referenceNo, term),
+          ilike(organisations.name, term)
+        )!
+      );
     }
 
     const result = await db
@@ -39,8 +54,9 @@ export async function GET(request: NextRequest) {
         organisations,
         eq(tenders.organisationId, organisations.id)
       )
-      .where(conditions.length ? conditions[0] : undefined)
-      .orderBy(desc(tenders.detectedAt));
+      .where(conditions.length ? and(...conditions) : undefined)
+      .orderBy(desc(tenders.detectedAt))
+      .limit(limit);
 
     return NextResponse.json({
       success: true,

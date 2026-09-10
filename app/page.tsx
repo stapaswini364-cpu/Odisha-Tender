@@ -99,8 +99,48 @@ export default function Home() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [tab, setTab] = useState<"tracker" | "all">("all");
   const [trackedIds, setTrackedIds] = useState<string[]>([]);
+
+  // Search results across the FULL database (not just latest 10)
+  const [searchResults, setSearchResults] = useState<Tender[] | null>(null);
+  const [searching, setSearching] = useState(false);
+
+  // Debounce the search query by 350ms so we don't hit the API on every keystroke
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedQuery(query.trim()), 350);
+    return () => clearTimeout(handle);
+  }, [query]);
+
+  // Whenever the debounced query changes, search the full database via /api/tenders
+  useEffect(() => {
+    if (!debouncedQuery) {
+      setSearchResults(null);
+      return;
+    }
+
+    let cancelled = false;
+    setSearching(true);
+
+    fetch(`/api/tenders?q=${encodeURIComponent(debouncedQuery)}&limit=100`, { cache: "no-store" })
+      .then((res) => res.json())
+      .then((data) => {
+        if (!cancelled && data.success) {
+          setSearchResults(data.data);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setSearchResults([]);
+      })
+      .finally(() => {
+        if (!cancelled) setSearching(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [debouncedQuery]);
 
   // Load tracked tender IDs from the database (shared across all devices/browsers)
   const loadTrackedIds = useCallback(async () => {
@@ -121,7 +161,6 @@ export default function Home() {
 
   // Toggle tracked state via the database API instead of localStorage
   async function toggleTracked(id: string) {
-    // Optimistic UI update
     setTrackedIds((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
     );
@@ -134,7 +173,6 @@ export default function Home() {
       });
 
       if (!response.ok) {
-        // revert optimistic update on failure
         await loadTrackedIds();
       }
     } catch {
@@ -167,19 +205,11 @@ export default function Home() {
     loadTrackedIds();
   }
 
-  const allTenders = dashboard?.latestTenders ?? [];
-  const trackerTenders = allTenders.filter((t) => trackedIds.includes(t.id));
-  const baseList = tab === "tracker" ? trackerTenders : allTenders;
+  // Base list: search results (full DB) when searching, otherwise latest 10 from dashboard
+  const baseTenders = debouncedQuery ? (searchResults ?? []) : (dashboard?.latestTenders ?? []);
 
-  const filteredTenders = baseList.filter((t) => {
-    if (!query.trim()) return true;
-    const q = query.toLowerCase();
-    return (
-      t.title?.toLowerCase().includes(q) ||
-      t.organisation?.toLowerCase().includes(q) ||
-      t.referenceNo?.toLowerCase().includes(q)
-    );
-  });
+  const displayedTenders =
+    tab === "tracker" ? baseTenders.filter((t) => trackedIds.includes(t.id)) : baseTenders;
 
   const lastUpdated = dashboard?.stats.lastRun?.startedAt
     ? formatDate(dashboard.stats.lastRun.startedAt)
@@ -187,7 +217,7 @@ export default function Home() {
 
   return (
     <main className="min-h-screen" style={{ backgroundColor: bg, color: text, ...sans }}>
-      {/* Top bar - masthead with live counters, like the reference but with real data */}
+      {/* Top bar - masthead with live counters */}
       <header style={{ borderBottom: `2px solid ${amber}`, backgroundColor: bg }}>
         <div className="mx-auto max-w-7xl px-6 py-5 flex items-center justify-between gap-6 flex-wrap">
           <div className="flex items-center gap-3">
@@ -207,11 +237,11 @@ export default function Home() {
           <div className="flex items-center gap-8 text-sm">
             <div>
               <p className="text-xs" style={{ color: muted }}>TRACKED</p>
-              <p style={{ ...mono, fontSize: "1.1rem" }} className="mt-0.5">{trackerTenders.length}</p>
+              <p style={{ ...mono, fontSize: "1.1rem" }} className="mt-0.5">{trackedIds.length}</p>
             </div>
             <div>
               <p className="text-xs" style={{ color: muted }}>ALL SEEN</p>
-              <p style={{ ...mono, fontSize: "1.1rem", color: amber }} className="mt-0.5">{allTenders.length}</p>
+              <p style={{ ...mono, fontSize: "1.1rem", color: amber }} className="mt-0.5">{dashboard?.latestTenders.length ?? 0}</p>
             </div>
             <div>
               <p className="text-xs" style={{ color: muted }}>NOTIFIED</p>
@@ -277,13 +307,20 @@ export default function Home() {
               >
                 All Tenders
               </button>
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search by title, organisation, reference…"
-                className="flex-1 min-w-[240px] rounded px-3 py-2 text-sm outline-none"
-                style={{ backgroundColor: panel, border: `1px solid ${line}`, color: text }}
-              />
+              <div className="flex-1 min-w-[240px] relative">
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search entire database by title, organisation, reference…"
+                  className="w-full rounded px-3 py-2 text-sm outline-none"
+                  style={{ backgroundColor: panel, border: `1px solid ${line}`, color: text }}
+                />
+                {searching && (
+                  <span className="absolute right-3 top-2.5 text-xs" style={{ color: muted }}>
+                    Searching…
+                  </span>
+                )}
+              </div>
               <button
                 onClick={handleRefresh}
                 disabled={refreshing}
@@ -294,16 +331,27 @@ export default function Home() {
               </button>
             </div>
 
-            {/* Tender list — paper panel like the reference, but functional */}
-            {filteredTenders.length === 0 ? (
+            {debouncedQuery && (
+              <p className="mb-3 text-xs" style={{ color: muted }}>
+                Searching full database for &ldquo;{debouncedQuery}&rdquo; — {searchResults?.length ?? 0} result(s)
+              </p>
+            )}
+
+            {/* Tender list */}
+            {displayedTenders.length === 0 ? (
               <div
                 className="rounded-lg px-8 py-16 text-center"
                 style={{ backgroundColor: "#EFEAE0", color: "#1A2333" }}
               >
-                <p className="text-lg font-semibold">No tenders {tab === "tracker" ? "tracked" : "found"} yet</p>
+                <p className="text-lg font-semibold">
+                  {debouncedQuery
+                    ? "No tenders match your search"
+                    : `No tenders ${tab === "tracker" ? "tracked" : "found"} yet`}
+                </p>
                 <p className="mt-2 text-sm" style={{ color: "#4A5568" }}>
-                  The watcher checks every ~4 minutes per batch across all organisations —
-                  this fills in automatically as new tenders come through, with instant Telegram alerts.
+                  {debouncedQuery
+                    ? "Try a different title, organisation, or reference number."
+                    : "The watcher checks every ~4 minutes per batch across all organisations — this fills in automatically as new tenders come through, with instant Telegram alerts."}
                 </p>
               </div>
             ) : (
@@ -321,7 +369,7 @@ export default function Home() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredTenders.map((tender) => (
+                    {displayedTenders.map((tender) => (
                       <tr key={tender.id} className="border-t" style={{ borderColor: "#D9D2C2" }}>
                         <td className="px-3 py-4">
                           <button
