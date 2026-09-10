@@ -102,23 +102,44 @@ export default function Home() {
   const [tab, setTab] = useState<"tracker" | "all">("all");
   const [trackedIds, setTrackedIds] = useState<string[]>([]);
 
-  useEffect(() => {
-    const saved = window.localStorage.getItem("tracked-tender-ids");
-    if (saved) {
-      try {
-        setTrackedIds(JSON.parse(saved));
-      } catch {
-        // ignore corrupt data
+  // Load tracked tender IDs from the database (shared across all devices/browsers)
+  const loadTrackedIds = useCallback(async () => {
+    try {
+      const response = await fetch("/api/tracked", { cache: "no-store" });
+      const data = await response.json();
+      if (response.ok && Array.isArray(data.tenderIds)) {
+        setTrackedIds(data.tenderIds);
       }
+    } catch {
+      // silently ignore - tracked list is non-critical
     }
   }, []);
 
-  function toggleTracked(id: string) {
-    setTrackedIds((prev) => {
-      const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id];
-      window.localStorage.setItem("tracked-tender-ids", JSON.stringify(next));
-      return next;
-    });
+  useEffect(() => {
+    loadTrackedIds();
+  }, [loadTrackedIds]);
+
+  // Toggle tracked state via the database API instead of localStorage
+  async function toggleTracked(id: string) {
+    // Optimistic UI update
+    setTrackedIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+
+    try {
+      const response = await fetch("/api/tracked", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tenderId: id }),
+      });
+
+      if (!response.ok) {
+        // revert optimistic update on failure
+        await loadTrackedIds();
+      }
+    } catch {
+      await loadTrackedIds();
+    }
   }
 
   const loadDashboard = useCallback(async () => {
@@ -143,6 +164,7 @@ export default function Home() {
   function handleRefresh() {
     setRefreshing(true);
     loadDashboard();
+    loadTrackedIds();
   }
 
   const allTenders = dashboard?.latestTenders ?? [];
