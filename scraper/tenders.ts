@@ -203,15 +203,17 @@ async function detectCaptcha(page: Page): Promise<boolean> {
 
 /**
  * Scrape tenders for a single organisation.
+ *
+ * Browser is provided by the caller so that the same browser
+ * instance can be reused across multiple organisations.
  */
 export async function scrapeTendersByOrganisation(
-  organisationName: string
+  organisationName: string,
+  browser: Awaited<ReturnType<typeof createBrowser>>
 ): Promise<ScrapedTender[]> {
-  const browser = await createBrowser();
+  const page = await browser.newPage();
 
   try {
-    const page = await browser.newPage();
-
     console.log(
       `\n========================================`
     );
@@ -537,9 +539,11 @@ export async function scrapeTendersByOrganisation(
     return tenders;
   } finally {
     /**
-     * Always close browser even when scraping
-     * or navigation fails.
+     * Close only the page.
+     *
+     * The browser itself is intentionally kept open
+     * and reused by the cron batch.
      */
-    await browser.close();
+    await page.close();
   }
 }

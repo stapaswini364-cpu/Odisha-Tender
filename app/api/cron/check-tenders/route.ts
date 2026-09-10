@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { eq } from "drizzle-orm";
+import { and, eq, lt } from "drizzle-orm";
 
 import { db } from "@/db";
 
@@ -10,15 +10,26 @@ import {
   jobRuns,
   notificationLogs,
   scraperState,
+  cronLocks,
 } from "@/db/schema";
 
 import { scrapeOrganisations } from "@/scraper/organisations";
-
 import { scrapeTendersByOrganisation } from "@/scraper/tenders";
+import { createBrowser } from "@/scraper/browser";
 
 const BATCH_SIZE = 15;
 
 const CURSOR_KEY = "org_cursor";
+
+const CRON_LOCK_KEY = "check-tenders";
+
+/**
+ * A lock older than this duration is considered stale.
+ *
+ * 45 minutes is intentionally longer than the expected execution
+ * time of a normal batch so a healthy job is not interrupted.
+ */
+const STALE_LOCK_MS = 45 * 60 * 1000;
 
 type ProcessOrganisationResult = {
   newItemsFound: number;
@@ -43,6 +54,7 @@ async function sendTelegramNotification(
   item: TelegramItem
 ) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
+
   const chatId = process.env.TELEGRAM_CHAT_ID;
 
   if (!token) {
@@ -76,9 +88,11 @@ Link: ${item.sourceUrl}`;
 
   const response = await fetch(url, {
     method: "POST",
+
     headers: {
       "Content-Type": "application/json",
     },
+
     body: JSON.stringify({
       chat_id: chatId,
       text: message,
@@ -95,15 +109,143 @@ Link: ${item.sourceUrl}`;
 }
 
 /**
+ * Acquire cron lock atomically.
+ *
+ * Strategy:
+ *
+ * 1. Try to insert a new lock.
+ * 2. If a lock already exists, check whether it is stale.
+ * 3. If stale, atomically reclaim it.
+ * 4. If active, return false.
+ *
+ * PostgreSQL primary key on cron_locks.key guarantees
+ * concurrent jobs cannot both acquire the same lock.
+ */
+async function acquireCronLock(
+  jobRunId: string
+): Promise<boolean> {
+  const now = new Date();
+
+  /**
+   * First attempt:
+   * acquire completely free lock.
+   */
+  const inserted = await db
+    .insert(cronLocks)
+    .values({
+      key: CRON_LOCK_KEY,
+      jobRunId,
+      lockedAt: now,
+    })
+    .onConflictDoNothing({
+      target: cronLocks.key,
+    })
+    .returning({
+      key: cronLocks.key,
+    });
+
+  if (inserted.length > 0) {
+    console.log(
+      `Cron lock acquired for job ${jobRunId}`
+    );
+
+    return true;
+  }
+
+  /**
+   * Existing lock found.
+   *
+   * Try to reclaim only if lockedAt is older
+   * than the stale threshold.
+   *
+   * This UPDATE is atomic.
+   */
+  const staleBefore = new Date(
+    Date.now() - STALE_LOCK_MS
+  );
+
+  const reclaimed = await db
+    .update(cronLocks)
+    .set({
+      jobRunId,
+      lockedAt: now,
+    })
+    .where(
+      and(
+        eq(
+          cronLocks.key,
+          CRON_LOCK_KEY
+        ),
+        lt(
+          cronLocks.lockedAt,
+          staleBefore
+        )
+      )
+    )
+    .returning({
+      key: cronLocks.key,
+    });
+
+  if (reclaimed.length > 0) {
+    console.warn(
+      `Stale cron lock detected and reclaimed by job ${jobRunId}`
+    );
+
+    return true;
+  }
+
+  /**
+   * Another healthy cron execution is still running.
+   */
+  console.warn(
+    "Cron lock is currently active. Another job is already running."
+  );
+
+  return false;
+}
+
+/**
+ * Release cron lock.
+ *
+ * jobRunId is checked so an old execution cannot
+ * accidentally delete a newer execution's lock.
+ */
+async function releaseCronLock(
+  jobRunId: string
+): Promise<void> {
+  await db
+    .delete(cronLocks)
+    .where(
+      and(
+        eq(
+          cronLocks.key,
+          CRON_LOCK_KEY
+        ),
+        eq(
+          cronLocks.jobRunId,
+          jobRunId
+        )
+      )
+    );
+}
+
+/**
  * Process one organisation.
+ *
+ * Browser is passed from the batch so the same browser
+ * instance can be reused for multiple organisations.
  */
 async function processOrganisation(
   org: {
     name: string;
     tenderCount: number;
-  }
+  },
+  browser: Awaited<
+    ReturnType<typeof createBrowser>
+  >
 ): Promise<ProcessOrganisationResult> {
   let newItemsFound = 0;
+
   let notificationsSent = 0;
 
   try {
@@ -118,6 +260,7 @@ async function processOrganisation(
       })
       .onConflictDoUpdate({
         target: organisations.name,
+
         set: {
           lastKnownCount: org.tenderCount,
           updatedAt: new Date(),
@@ -136,7 +279,8 @@ async function processOrganisation(
      */
     const scrapedTenders =
       await scrapeTendersByOrganisation(
-        org.name
+        org.name,
+        browser
       );
 
     console.log(
@@ -149,9 +293,6 @@ async function processOrganisation(
     for (const t of scrapedTenders) {
       /**
        * Check existing tender.
-       *
-       * externalKey is unique and is our
-       * primary idempotency key.
        */
       const existing = await db
         .select()
@@ -166,9 +307,6 @@ async function processOrganisation(
 
       /**
        * Already processed.
-       *
-       * Do not create another tender and
-       * do not send another notification.
        */
       if (existing.length > 0) {
         continue;
@@ -215,9 +353,6 @@ async function processOrganisation(
           });
 
         if (tgResult?.ok) {
-          /**
-           * Mark tender notification as sent.
-           */
           await db
             .update(tenders)
             .set({
@@ -231,16 +366,13 @@ async function processOrganisation(
               )
             );
 
-          /**
-           * Save notification log.
-           */
           await db
             .insert(notificationLogs)
             .values({
               tenderId: newTender.id,
               chatId:
-                process.env
-                  .TELEGRAM_CHAT_ID ?? null,
+                process.env.TELEGRAM_CHAT_ID ??
+                null,
               status: "sent",
               sentAt: new Date(),
               attemptCount: 1,
@@ -248,10 +380,6 @@ async function processOrganisation(
 
           notificationsSent++;
         } else {
-          /**
-           * Telegram API returned an unsuccessful
-           * response.
-           */
           const telegramError =
             JSON.stringify(tgResult);
 
@@ -272,8 +400,8 @@ async function processOrganisation(
             .values({
               tenderId: newTender.id,
               chatId:
-                process.env
-                  .TELEGRAM_CHAT_ID ?? null,
+                process.env.TELEGRAM_CHAT_ID ??
+                null,
               status: "failed",
               attemptCount: 1,
               errorMessage: telegramError,
@@ -295,12 +423,6 @@ async function processOrganisation(
           errorMessage
         );
 
-        /**
-         * Tender remains in database.
-         *
-         * This prevents duplicate tender creation
-         * on the next scrape.
-         */
         await db
           .update(tenders)
           .set({
@@ -318,8 +440,8 @@ async function processOrganisation(
           .values({
             tenderId: newTender.id,
             chatId:
-              process.env
-                .TELEGRAM_CHAT_ID ?? null,
+              process.env.TELEGRAM_CHAT_ID ??
+              null,
             status: "failed",
             attemptCount: 1,
             errorMessage,
@@ -344,9 +466,6 @@ async function processOrganisation(
       errorMessage
     );
 
-    /**
-     * CAPTCHA is treated separately.
-     */
     if (
       errorMessage.startsWith(
         "CAPTCHA_REQUIRED:"
@@ -433,6 +552,7 @@ export async function POST(
     .insert(jobRuns)
     .values({
       status: "running",
+      startedAt: new Date(),
     })
     .returning();
 
@@ -446,7 +566,47 @@ export async function POST(
     );
   }
 
+  /**
+   * IMPORTANT:
+   *
+   * Keep this flag so the finally block only
+   * releases a lock actually owned by this job.
+   */
+  let lockAcquired = false;
+
+  /**
+   * ==================================================
+   * MAIN CRON EXECUTION
+   * ==================================================
+   */
   try {
+    /**
+     * Atomic cron lock.
+     */
+    lockAcquired =
+      await acquireCronLock(
+        jobRun.id
+      );
+
+    if (!lockAcquired) {
+      runStatus = "failed";
+
+      errorMessage =
+        "Skipped because another cron job is already running.";
+
+      console.warn(
+        "Cron skipped: another check-tenders job is already running."
+      );
+
+      return NextResponse.json(
+        {
+          status: "skipped",
+          reason: "job_already_running",
+        },
+        { status: 409 }
+      );
+    }
+
     /**
      * Get scraper cursor.
      */
@@ -472,6 +632,12 @@ export async function POST(
           cursor: 0,
         })
         .returning();
+
+      if (!inserted) {
+        throw new Error(
+          "Unable to initialize scraper cursor"
+        );
+      }
 
       stateRows = [inserted];
     }
@@ -518,51 +684,78 @@ export async function POST(
     let captchaFailures = 0;
 
     /**
-     * Process organisations sequentially.
+     * Create ONE browser for the complete batch.
      */
-    for (const org of batch) {
-      const result =
-        await processOrganisation(org);
+    const browser =
+      await createBrowser();
 
-      newItemsFound +=
-        result.newItemsFound;
+    try {
+      /**
+       * Process organisations sequentially.
+       */
+      for (const org of batch) {
+        const result =
+          await processOrganisation(
+            org,
+            browser
+          );
 
-      notificationsSent +=
-        result.notificationsSent;
+        newItemsFound +=
+          result.newItemsFound;
 
-      if (
-        result.status ===
-        "captcha_failed"
-      ) {
-        captchaFailures++;
+        notificationsSent +=
+          result.notificationsSent;
 
-        console.warn(
-          `CAPTCHA failure for organisation: ${org.name}`
-        );
+        if (
+          result.status ===
+          "captcha_failed"
+        ) {
+          captchaFailures++;
 
-        console.warn(
-          result.errorMessage
-        );
+          console.warn(
+            `CAPTCHA failure for organisation: ${org.name}`
+          );
+
+          console.warn(
+            result.errorMessage
+          );
+        }
+
+        if (
+          result.status ===
+          "failed"
+        ) {
+          failedOrganisations++;
+
+          console.error(
+            `Organisation failed: ${org.name}`
+          );
+
+          console.error(
+            result.errorMessage
+          );
+        }
       }
+    } finally {
+      /**
+       * Always close browser.
+       */
+      try {
+        await browser.close();
 
-      if (
-        result.status === "failed"
-      ) {
-        failedOrganisations++;
-
-        console.error(
-          `Organisation failed: ${org.name}`
+        console.log(
+          "Browser closed successfully."
         );
-
+      } catch (browserError) {
         console.error(
-          result.errorMessage
+          "Failed to close browser:",
+          browserError
         );
       }
     }
 
     /**
-     * Move cursor only after the batch has
-     * been attempted.
+     * Move cursor after batch attempt.
      */
     const nextCursor =
       cursor + batch.length;
@@ -593,7 +786,8 @@ export async function POST(
      * Determine final job status.
      */
     if (captchaFailures > 0) {
-      runStatus = "captcha_failed";
+      runStatus =
+        "captcha_failed";
 
       errorMessage =
         `${captchaFailures} organisation(s) encountered CAPTCHA. ` +
@@ -620,34 +814,78 @@ export async function POST(
       "Cron job failed:",
       errorMessage
     );
+  } finally {
+    /**
+     * ==================================================
+     * GUARANTEED LOCK RELEASE
+     * ==================================================
+     *
+     * Release first so that even if job-run
+     * finalization fails, the next cron execution
+     * is not permanently blocked.
+     */
+    if (lockAcquired) {
+      try {
+        await releaseCronLock(
+          jobRun.id
+        );
+
+        console.log(
+          `Cron lock released for job ${jobRun.id}`
+        );
+      } catch (lockError) {
+        console.error(
+          "Failed to release cron lock:",
+          lockError
+        );
+      }
+    }
+
+    /**
+     * Finalize job run.
+     *
+     * This is deliberately inside its own try/catch
+     * so a database finalization error cannot affect
+     * lock release.
+     */
+    try {
+      const durationMs =
+        Date.now() - startTime;
+
+      await db
+        .update(jobRuns)
+        .set({
+          finishedAt: new Date(),
+          status: runStatus,
+          newItemsFound,
+          notificationsSent,
+          durationMs,
+          errorMessage,
+        })
+        .where(
+          eq(
+            jobRuns.id,
+            jobRun.id
+          )
+        );
+
+      console.log(
+        `Job run ${jobRun.id} finalized with status: ${runStatus}`
+      );
+    } catch (finalizationError) {
+      console.error(
+        "Failed to finalize job run:",
+        finalizationError
+      );
+    }
   }
-
-  /**
-   * Finalize job run.
-   */
-  const durationMs =
-    Date.now() - startTime;
-
-  await db
-    .update(jobRuns)
-    .set({
-      finishedAt: new Date(),
-      status: runStatus,
-      newItemsFound,
-      notificationsSent,
-      durationMs,
-      errorMessage,
-    })
-    .where(
-      eq(
-        jobRuns.id,
-        jobRun.id
-      )
-    );
 
   /**
    * Return job result.
    */
+  const durationMs =
+    Date.now() - startTime;
+
   return NextResponse.json({
     status: runStatus,
     newItemsFound,

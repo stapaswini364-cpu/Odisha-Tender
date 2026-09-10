@@ -1,6 +1,7 @@
 import "dotenv/config";
 
 import { scrapeTendersByOrganisation } from "./scraper/tenders";
+import { createBrowser } from "./scraper/browser";
 
 async function main() {
   const organisationName =
@@ -14,10 +15,21 @@ async function main() {
     `Organisation: ${organisationName}`
   );
 
+  let browser: Awaited<
+    ReturnType<typeof createBrowser>
+  > | null = null;
+
   try {
+    console.log("\nStarting browser...");
+
+    browser = await createBrowser();
+
+    console.log("Browser started.");
+
     const tenders =
       await scrapeTendersByOrganisation(
-        organisationName
+        organisationName,
+        browser
       );
 
     console.log("\n========================================");
@@ -44,16 +56,16 @@ async function main() {
         "\n----------------------------------------"
       );
 
-      console.log(
-        `#${index + 1}`
-      );
+      console.log(`#${index + 1}`);
 
       console.log(
         `Title        : ${tender.title}`
       );
 
       console.log(
-        `Reference No : ${tender.referenceNo ?? "N/A"}`
+        `Reference No : ${
+          tender.referenceNo ?? "N/A"
+        }`
       );
 
       console.log(
@@ -94,6 +106,14 @@ async function main() {
     );
 
     console.error(error);
+  } finally {
+    if (browser) {
+      console.log("\nClosing browser...");
+
+      await browser.close();
+
+      console.log("Browser closed.");
+    }
   }
 }
 

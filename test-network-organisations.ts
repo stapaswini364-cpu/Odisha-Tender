@@ -1,6 +1,7 @@
 import "dotenv/config";
 
 import { scrapeTendersByOrganisation } from "./scraper/tenders";
+import { createBrowser } from "./scraper/browser";
 
 const organisations = [
   "CE-BM,LMB Basin,BBSR",
@@ -31,167 +32,200 @@ async function main() {
 
   const results: TestResult[] = [];
 
-  for (let i = 0; i < organisations.length; i++) {
-    const organisation = organisations[i];
+  let browser: Awaited<
+    ReturnType<typeof createBrowser>
+  > | null = null;
 
-    console.log("\n========================================");
-    console.log(
-      `[${i + 1}/${organisations.length}] ${organisation}`
-    );
-    console.log("========================================");
+  try {
+    console.log("\nStarting shared browser...");
 
-    const organisationStartedAt = Date.now();
+    browser = await createBrowser();
 
-    try {
-      const tenders =
-        await scrapeTendersByOrganisation(
-          organisation
+    console.log("Shared browser started.");
+
+    for (let i = 0; i < organisations.length; i++) {
+      const organisation = organisations[i];
+
+      console.log("\n========================================");
+      console.log(
+        `[${i + 1}/${organisations.length}] ${organisation}`
+      );
+      console.log("========================================");
+
+      const organisationStartedAt = Date.now();
+
+      try {
+        const tenders =
+          await scrapeTendersByOrganisation(
+            organisation,
+            browser
+          );
+
+        const durationMs =
+          Date.now() - organisationStartedAt;
+
+        console.log("\n----------------------------------------");
+        console.log("RESULT");
+        console.log("----------------------------------------");
+
+        console.log(
+          `Organisation : ${organisation}`
         );
 
-      const durationMs =
-        Date.now() - organisationStartedAt;
+        console.log(
+          `Status       : SUCCESS`
+        );
 
-      console.log("\n----------------------------------------");
-      console.log("RESULT");
-      console.log("----------------------------------------");
+        console.log(
+          `Tender Count : ${tenders.length}`
+        );
 
-      console.log(
-        `Organisation : ${organisation}`
-      );
+        console.log(
+          `Duration     : ${Math.round(
+            durationMs / 1000
+          )} sec`
+        );
 
-      console.log(
-        `Status       : SUCCESS`
-      );
+        results.push({
+          organisation,
+          status: "SUCCESS",
+          tenderCount: tenders.length,
+          durationMs,
+        });
+      } catch (error) {
+        const durationMs =
+          Date.now() - organisationStartedAt;
 
-      console.log(
-        `Tender Count : ${tenders.length}`
-      );
+        const errorMessage =
+          error instanceof Error
+            ? error.message
+            : String(error);
 
-      console.log(
-        `Duration     : ${Math.round(durationMs / 1000)} sec`
-      );
+        console.error(
+          "\n----------------------------------------"
+        );
 
-      results.push({
-        organisation,
-        status: "SUCCESS",
-        tenderCount: tenders.length,
-        durationMs,
-      });
-    } catch (error) {
-      const durationMs =
-        Date.now() - organisationStartedAt;
+        console.error("RESULT");
 
-      const errorMessage =
-        error instanceof Error
-          ? error.message
-          : String(error);
+        console.error(
+          "----------------------------------------"
+        );
 
-      console.error("\n----------------------------------------");
-      console.error("RESULT");
-      console.error("----------------------------------------");
+        console.error(
+          `Organisation : ${organisation}`
+        );
 
-      console.error(
-        `Organisation : ${organisation}`
-      );
+        console.error(
+          `Status       : FAILED`
+        );
 
-      console.error(
-        `Status       : FAILED`
-      );
+        console.error(
+          `Error        : ${errorMessage}`
+        );
 
-      console.error(
-        `Error        : ${errorMessage}`
-      );
+        console.error(
+          `Duration     : ${Math.round(
+            durationMs / 1000
+          )} sec`
+        );
 
-      console.error(
-        `Duration     : ${Math.round(durationMs / 1000)} sec`
-      );
+        results.push({
+          organisation,
+          status: "FAILED",
+          tenderCount: 0,
+          error: errorMessage,
+          durationMs,
+        });
+      }
+    }
 
-      results.push({
-        organisation,
-        status: "FAILED",
-        tenderCount: 0,
-        error: errorMessage,
-        durationMs,
+    const totalDurationMs =
+      Date.now() - startedAt;
+
+    const successful = results.filter(
+      (item) => item.status === "SUCCESS"
+    );
+
+    const failed = results.filter(
+      (item) => item.status === "FAILED"
+    );
+
+    console.log("\n\n========================================");
+    console.log("       NETWORK TEST FINAL RESULT");
+    console.log("========================================");
+
+    console.log(
+      `Total Tested : ${results.length}`
+    );
+
+    console.log(
+      `Successful   : ${successful.length}`
+    );
+
+    console.log(
+      `Failed       : ${failed.length}`
+    );
+
+    console.log(
+      `Total Time   : ${Math.round(
+        totalDurationMs / 1000
+      )} sec`
+    );
+
+    console.log("\n========================================");
+    console.log("          SUCCESSFUL ORGANISATIONS");
+    console.log("========================================");
+
+    if (successful.length === 0) {
+      console.log("None");
+    } else {
+      successful.forEach((item, index) => {
+        console.log(
+          `${index + 1}. ${item.organisation} | ${
+            item.tenderCount
+          } tenders | ${Math.round(
+            item.durationMs / 1000
+          )} sec`
+        );
       });
     }
+
+    console.log("\n========================================");
+    console.log("            FAILED ORGANISATIONS");
+    console.log("========================================");
+
+    if (failed.length === 0) {
+      console.log("None");
+    } else {
+      failed.forEach((item, index) => {
+        console.log(
+          `\n${index + 1}. ${item.organisation}`
+        );
+
+        console.log(
+          `   Error: ${item.error}`
+        );
+
+        console.log(
+          `   Duration: ${Math.round(
+            item.durationMs / 1000
+          )} sec`
+        );
+      });
+    }
+
+    console.log("\n========================================");
+    console.log("             TEST COMPLETE");
+    console.log("========================================");
+  } finally {
+    if (browser) {
+      console.log("\nClosing shared browser...");
+
+      await browser.close();
+
+      console.log("Shared browser closed.");
+    }
   }
-
-  const totalDurationMs =
-    Date.now() - startedAt;
-
-  const successful = results.filter(
-    (item) => item.status === "SUCCESS"
-  );
-
-  const failed = results.filter(
-    (item) => item.status === "FAILED"
-  );
-
-  console.log("\n\n========================================");
-  console.log("       NETWORK TEST FINAL RESULT");
-  console.log("========================================");
-
-  console.log(
-    `Total Tested : ${results.length}`
-  );
-
-  console.log(
-    `Successful   : ${successful.length}`
-  );
-
-  console.log(
-    `Failed       : ${failed.length}`
-  );
-
-  console.log(
-    `Total Time   : ${Math.round(
-      totalDurationMs / 1000
-    )} sec`
-  );
-
-  console.log("\n========================================");
-  console.log("          SUCCESSFUL ORGANISATIONS");
-  console.log("========================================");
-
-  if (successful.length === 0) {
-    console.log("None");
-  } else {
-    successful.forEach((item, index) => {
-      console.log(
-        `${index + 1}. ${item.organisation} | ${item.tenderCount} tenders | ${Math.round(
-          item.durationMs / 1000
-        )} sec`
-      );
-    });
-  }
-
-  console.log("\n========================================");
-  console.log("            FAILED ORGANISATIONS");
-  console.log("========================================");
-
-  if (failed.length === 0) {
-    console.log("None");
-  } else {
-    failed.forEach((item, index) => {
-      console.log(
-        `\n${index + 1}. ${item.organisation}`
-      );
-
-      console.log(
-        `   Error: ${item.error}`
-      );
-
-      console.log(
-        `   Duration: ${Math.round(
-          item.durationMs / 1000
-        )} sec`
-      );
-    });
-  }
-
-  console.log("\n========================================");
-  console.log("             TEST COMPLETE");
-  console.log("========================================");
 }
 
 main();
