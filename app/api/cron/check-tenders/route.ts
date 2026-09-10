@@ -17,7 +17,7 @@ import { scrapeOrganisations } from "@/scraper/organisations";
 import { scrapeTendersByOrganisation } from "@/scraper/tenders";
 import { createBrowser } from "@/scraper/browser";
 
-const BATCH_SIZE = 15;
+const BATCH_SIZE = 2;
 
 const CURSOR_KEY = "org_cursor";
 
@@ -26,10 +26,11 @@ const CRON_LOCK_KEY = "check-tenders";
 /**
  * A lock older than this duration is considered stale.
  *
- * 45 minutes is intentionally longer than the expected execution
- * time of a normal batch so a healthy job is not interrupted.
+ * Kept short because Vercel serverless functions can be killed
+ * by the platform timeout before the finally block runs, which
+ * would otherwise leave the lock stuck for a long time.
  */
-const STALE_LOCK_MS = 45 * 60 * 1000;
+const STALE_LOCK_MS = 8 * 60 * 1000;
 
 type ProcessOrganisationResult = {
   newItemsFound: number;
