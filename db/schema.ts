@@ -72,7 +72,14 @@ export const scraperState = pgTable("scraper_state", {
   keyUnique: uniqueIndex("scraper_state_key_unique").on(table.key),
 }));
 
-// 7. Tracked tenders table (user-starred/bookmarked tenders, shared across devices)
+// 7. Cron lock table (prevents multiple check-tenders cron jobs from running simultaneously)
+export const cronLocks = pgTable("cron_locks", {
+  key: text("key").primaryKey(),
+  lockedAt: timestamp("locked_at", { withTimezone: true }).defaultNow().notNull(),
+  jobRunId: uuid("job_run_id").references(() => jobRuns.id),
+});
+
+// 8. Tracked tenders table (user-starred/bookmarked tenders, shared across devices)
 export const trackedTenders = pgTable("tracked_tenders", {
   id: uuid("id").defaultRandom().primaryKey(),
   tenderId: uuid("tender_id").notNull().references(() => tenders.id),
