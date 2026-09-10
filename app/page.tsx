@@ -93,6 +93,15 @@ function Dot({ color }: { color: string }) {
   return <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ backgroundColor: color }} />;
 }
 
+// Extract district/area name from the tender title.
+// Portal titles usually contain phrasing like "... in the district of Malkangiri for the year ..."
+// so we parse it out here rather than re-scraping or changing the database schema.
+function extractDistrict(title: string | null): string {
+  if (!title) return "—";
+  const match = title.match(/district\s+of\s+([A-Za-z][A-Za-z\s]*?)(?=\s+(?:for|under|during|in|on)\b|[.,]|$)/i);
+  return match ? match[1].trim() : "—";
+}
+
 export default function Home() {
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -362,6 +371,7 @@ export default function Home() {
                       <th className="px-3 py-3 font-semibold text-xs uppercase tracking-wide"></th>
                       <th className="px-5 py-3 font-semibold text-xs uppercase tracking-wide">Tender</th>
                       <th className="px-5 py-3 font-semibold text-xs uppercase tracking-wide">Organisation</th>
+                      <th className="px-5 py-3 font-semibold text-xs uppercase tracking-wide">District</th>
                       <th className="px-5 py-3 font-semibold text-xs uppercase tracking-wide">Kind</th>
                       <th className="px-5 py-3 font-semibold text-xs uppercase tracking-wide">Detected</th>
                       <th className="px-5 py-3 font-semibold text-xs uppercase tracking-wide">Notified</th>
@@ -389,6 +399,9 @@ export default function Home() {
                         </td>
                         <td className="px-5 py-4 max-w-[200px]">
                           <p className="truncate" style={{ color: "#4A5568" }}>{tender.organisation || "Unknown"}</p>
+                        </td>
+                        <td className="px-5 py-4">
+                          <p className="text-xs" style={{ color: "#4A5568" }}>{extractDistrict(tender.title)}</p>
                         </td>
                         <td className="px-5 py-4">
                           <span
